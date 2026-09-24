@@ -79,6 +79,82 @@ _MIN_TIMEOUT_S = 5
 _MAX_TIMEOUT_S = 1800
 _STDERR_CAP_CHARS = 4000
 
+# Browser Use's stock helper module is separate from agent-browser. This small
+# runtime wrapper gives its normal helpers bounded, human-paced pointer/keyboard
+# behavior without modifying the installed package. It only changes interaction
+# timing; it does not spoof browser fingerprints or bypass site controls.
+_HUMAN_INPUT_PREAMBLE = r'''
+# hermes: human-paced CDP input for Browser Use helpers
+import os as _hermes_os
+import random as _hermes_random
+import time as _hermes_time
+
+try:
+    import browser_harness.helpers as _hermes_helpers
+except Exception:
+    _hermes_helpers = None
+
+_hermes_original_press_key = globals().get("press_key")
+_hermes_original_type_text = globals().get("type_text")
+_hermes_original_click_at_xy = globals().get("click_at_xy")
+
+
+def _hermes_input_mode(human=None):
+    if human is not None:
+        return "human" if human else "instant"
+    mode = _hermes_os.environ.get("BROWSER_INPUT_MODE", "human").strip().lower()
+    return mode if mode in {"instant", "smooth", "human"} else "human"
+
+
+def _hermes_paced(human=None):
+    return _hermes_input_mode(human) in {"human", "smooth"}
+
+
+def _hermes_pause(low=0.015, high=0.045, human=None):
+    mode = _hermes_input_mode(human)
+    if mode == "human":
+        _hermes_time.sleep(_hermes_random.uniform(low, high))
+    elif mode == "smooth":
+        _hermes_time.sleep(_hermes_random.uniform(low / 4, high / 4))
+
+
+def press_key(key, modifiers=0, human=None):
+    if _hermes_original_press_key is None:
+        raise RuntimeError("Hermes human input wrapper could not find press_key")
+    _hermes_original_press_key(key, modifiers)
+    _hermes_pause(human=human)
+
+
+def type_text(text, human=None):
+    """Type through real CDP key events with a bounded per-character pace."""
+    if not _hermes_paced(human) and _hermes_original_type_text is not None:
+        return _hermes_original_type_text(text)
+    if _hermes_original_press_key is None:
+        raise RuntimeError("Hermes human input wrapper could not find press_key")
+    for _hermes_char in str(text):
+        press_key(_hermes_char, human=human)
+
+
+def click_at_xy(x, y, button="left", clicks=1, human=None):
+    """Click with a small settle delay while preserving the stock CDP path."""
+    if _hermes_original_click_at_xy is None:
+        raise RuntimeError("Hermes human input wrapper could not find click_at_xy")
+    if _hermes_paced(human):
+        _hermes_pause(0.025, 0.085, human=human)
+    result = _hermes_original_click_at_xy(x, y, button=button, clicks=clicks)
+    _hermes_pause(0.035, 0.11, human=human)
+    return result
+
+
+if _hermes_helpers is not None:
+    # The imported helper functions resolve their private module globals, not
+    # this runner's globals. Patch those names too so fill_input() and other
+    # stock helpers use the paced versions rather than bypassing the wrapper.
+    _hermes_helpers.press_key = press_key
+    _hermes_helpers.type_text = type_text
+    _hermes_helpers.click_at_xy = click_at_xy
+'''
+
 _TASK_ID_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")  # filesystem-safe task ids
 # Screenshot paths printed by capture_screenshot(): POSIX or Windows drive-letter absolute.
 _IMAGE_PATH_RE = re.compile(r"((?:[A-Za-z]:[\\/]|/)[^\s\"']+?\.(?:png|jpe?g|webp))", re.IGNORECASE)
@@ -139,9 +215,16 @@ def _blocked_url_in_code(code: str) -> Optional[str]:
     return next((err.get("error", "Blocked: unsafe URL") for err in map(evaluate_url_safety, _URL_RE.findall(code or "")) if err), None)
 
 
+# Browser Use's helper subprocess receives the selected mode through the
+# explicit environment contract below.
 def _base_subprocess_env() -> dict:
     from tools.browser_tool import _build_browser_env
     env = _build_browser_env()
+    # Browser Use's helper layer is separate from agent-browser. Keep the
+    # configured mode visible to Hermes-owned wrappers; the stock harness
+    # ignores it and still uses its real CDP key/mouse helpers.
+    from tools.browser_tool_cloud import _get_input_mode
+    env["BROWSER_INPUT_MODE"] = _get_input_mode()
     # The CLI runs under its own Python (uv tool / uvx); an inherited PYTHONPATH/PYTHONHOME
     # (Hermes's venv) wins over its site-packages → wrong-ABI C-extensions and a crash.
     # PYTHONPATH/PYTHONHOME inherited from the agent process point at Hermes's venv site-packages, and a
@@ -643,13 +726,14 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
     private_browser = env.pop(_PRIVATE_BROWSER_SENTINEL, None)  # always pop: never exported to the CLI
     if session and not private_browser:
         code = _OWN_TAB_PREAMBLE + code
+    code = _HUMAN_INPUT_PREAMBLE + code
 
     workspace = _workspace_dir(task_id)
     if workspace:
         env["BH_AGENT_WORKSPACE"] = workspace
 
     # BU_AUTOSPAWN makes the CLI start a Browser Use cloud browser when no local
-    # Chrome/CDP endpoint is reachable (their API key authenticates it)
+    # Chrome/CDP endpoint is reachable (their API key authenticates it).
     if "BU_AUTOSPAWN" not in env and is_legacy_browser_use_cloud_config(_read_browser_cfg()):
         env["BU_AUTOSPAWN"] = "1"
 

@@ -203,6 +203,36 @@ def _get_browser_engine() -> str:
     return _memo(_bt, "_browser_engine_resolved", "_cached_browser_engine", compute)
 
 
+def _get_input_mode() -> str:
+    """Return agent-browser's global input pacing mode.
+
+    ``browser.input_mode`` wins when explicitly present, then
+    ``AGENT_BROWSER_INPUT_MODE`` for operator compatibility, then ``human``.
+    Unknown values fail safe to ``human``: pacing is the safer default and this
+    helper never guesses a stealth or fingerprinting behavior.
+    """
+    _bt = _origin()
+    valid = {"instant", "smooth", "human"}
+
+    def compute() -> str:
+        try:
+            from hermes_cli.config import read_raw_config
+            browser_cfg = read_raw_config().get("browser", {})
+            raw = browser_cfg.get("input_mode") if isinstance(browser_cfg, dict) else None
+        except Exception as e:
+            _bt.logger.debug("Could not read browser.input_mode: %s", e)
+            raw = None
+        if raw is None:
+            raw = os.environ.get("AGENT_BROWSER_INPUT_MODE", "human")
+        raw = str(raw).strip().lower() or "human"
+        if raw not in valid:
+            _bt.logger.warning("Unknown browser input mode %r (valid: %s), falling back to 'human'", raw, ", ".join(sorted(valid)))
+            return "human"
+        return str(raw)
+
+    return _memo(_bt, "_input_mode_resolved", "_cached_input_mode", compute)
+
+
 def _is_headed_mode() -> bool:
     """True when the browser should launch headed: ``browser.headed``, else ``AGENT_BROWSER_HEADED``; cached."""
     _bt = _origin()

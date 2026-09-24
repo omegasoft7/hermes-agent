@@ -30,6 +30,7 @@ from tools import browser_tool_session as bt_session
 def _clean_env(monkeypatch):
     monkeypatch.delenv("BU_NAME", raising=False)
     monkeypatch.delenv("BU_AUTOSPAWN", raising=False)
+    monkeypatch.delenv("BROWSER_INPUT_MODE", raising=False)
     monkeypatch.delenv("BROWSER_USE_API_KEY", raising=False)
     yield
 
@@ -132,6 +133,7 @@ class TestSubprocessEnvironment:
 
         browser_tool = ModuleType("tools.browser_tool")
         browser_tool._build_browser_env = lambda: {}
+        monkeypatch.setattr(bt_cloud, "_get_input_mode", lambda: "human")
         monkeypatch.setitem(sys.modules, "tools.browser_tool", browser_tool)
         env = bu_cli._base_subprocess_env()
         assert env["ANONYMIZED_TELEMETRY"] == "false"
@@ -150,6 +152,7 @@ class TestSubprocessEnvironment:
             "PYTHONHOME": "/hermes/venv",
             "KEEP_ME": "yes",
         }
+        monkeypatch.setattr(bt_cloud, "_get_input_mode", lambda: "human")
         monkeypatch.setitem(sys.modules, "tools.browser_tool", browser_tool)
 
         env = bu_cli._base_subprocess_env()
@@ -174,6 +177,7 @@ class TestSubprocessEnvironment:
                 ["/home/u/.nvm/versions/node/v24.18.0/bin"] * 7
             ),
         }
+        monkeypatch.setattr(bt_cloud, "_get_input_mode", lambda: "human")
         monkeypatch.setitem(sys.modules, "tools.browser_tool", browser_tool)
 
         env = bu_cli._base_subprocess_env()
@@ -626,6 +630,125 @@ class TestOwnTabPreamble:
         assert result["success"] is True
         assert "_hermes_ensure_own_tab" not in result["output"]
 
+    def test_browser_use_env_exposes_configured_input_mode(self, tmp_path, monkeypatch):
+        """The CLI helper layer receives a stable pacing hint from Hermes."""
+        monkeypatch.setattr("tools.browser_tool_cdp._get_cdp_override", lambda: "")
+        monkeypatch.setattr(bt_cloud, "_get_cloud_provider", lambda: None)
+        monkeypatch.setattr(bt_cloud, "_get_input_mode", lambda: "human")
+        cli = _fake_cli(tmp_path, 'cat > /dev/null\necho "input:${BROWSER_INPUT_MODE:-unset}"\n')
+        monkeypatch.setattr(bu_cli, "_find_cli", lambda: [cli])
+        result = json.loads(str(bu_cli.browser_exec("print(1)", session="r7k2")))
+        assert "input:human" in result["output"]
+
+    def test_human_input_preamble_wraps_stock_helpers(self, tmp_path, monkeypatch):
+        """Browser Use code receives a real-input wrapper without package edits."""
+        import ast
+
+        ast.parse(bu_cli._HUMAN_INPUT_PREAMBLE + "print('payload')")
+        assert "Input.dispatchKeyEvent" not in bu_cli._HUMAN_INPUT_PREAMBLE
+        assert "Input.insertText" not in bu_cli._HUMAN_INPUT_PREAMBLE
+        assert "_hermes_original_click_at_xy" in bu_cli._HUMAN_INPUT_PREAMBLE
+        assert "press_key" in bu_cli._HUMAN_INPUT_PREAMBLE
+
+    def test_human_input_preamble_rebinds_public_helpers(self, monkeypatch):
+        """Pre-imported public names use the stock event path with bounded pacing."""
+        monkeypatch.setenv("BROWSER_INPUT_MODE", "human")
+        original_calls = []
+        events = []
+
+        def press_key(key, modifiers=0):
+            original_calls.append(("key", key, modifiers))
+
+        def type_text(text):
+            original_calls.append(("text", text))
+
+        def click_at_xy(x, y, button="left", clicks=1):
+            original_calls.append(("click", x, y, button, clicks))
+
+        def cdp(method, **params):
+            events.append((method, params))
+
+        namespace = {
+            "press_key": press_key,
+            "type_text": type_text,
+            "click_at_xy": click_at_xy,
+            "cdp": cdp,
+        }
+        exec(bu_cli._HUMAN_INPUT_PREAMBLE, namespace)
+
+        namespace["type_text"]("ab")
+        namespace["click_at_xy"](40, 50)
+
+        assert original_calls == [("key", "a", 0), ("key", "b", 0), ("click", 40, 50, "left", 1)]
+        assert events == []
+
+    def test_human_input_preamble_honors_instant_override(self, monkeypatch):
+        """An explicit instant mode delegates to the stock helper without CDP replay."""
+        monkeypatch.delenv("BROWSER_INPUT_MODE", raising=False)
+        monkeypatch.setenv("BROWSER_INPUT_MODE", "instant")
+        original_calls = []
+        events = []
+        namespace = {
+            "press_key": lambda key, modifiers=0: original_calls.append(("key", key, modifiers)),
+            "type_text": lambda text: original_calls.append(("text", text)),
+            "click_at_xy": lambda x, y, button="left", clicks=1: original_calls.append(("click", x, y, button, clicks)),
+            "cdp": lambda method, **params: events.append((method, params)),
+        }
+        exec(bu_cli._HUMAN_INPUT_PREAMBLE, namespace)
+
+        namespace["type_text"]("ab")
+        namespace["click_at_xy"](40, 50)
+
+        assert original_calls == [("text", "ab"), ("click", 40, 50, "left", 1)]
+        assert events == []
+
+    def test_human_input_preamble_supports_smooth_and_per_call_override(self, monkeypatch):
+        """Smooth and human=True pace stock key events; human=False uses stock text input."""
+        monkeypatch.setenv("BROWSER_INPUT_MODE", "smooth")
+        original_calls = []
+        namespace = {
+            "press_key": lambda key, modifiers=0: original_calls.append(("key", key, modifiers)),
+            "type_text": lambda text: original_calls.append(("text", text)),
+            "click_at_xy": lambda x, y, button="left", clicks=1: original_calls.append(("click", x, y, button, clicks)),
+        }
+        exec(bu_cli._HUMAN_INPUT_PREAMBLE, namespace)
+
+        namespace["type_text"]("ab")
+        namespace["click_at_xy"](40, 50)
+        assert original_calls == [
+            ("key", "a", 0), ("key", "b", 0), ("click", 40, 50, "left", 1)
+        ]
+
+        original_calls.clear()
+        namespace["type_text"]("cd", human=False)
+        namespace["click_at_xy"](60, 70, human=False)
+        assert original_calls == [("text", "cd"), ("click", 60, 70, "left", 1)]
+
+        original_calls.clear()
+        namespace["type_text"]("ef", human=True)
+        assert original_calls == [("key", "e", 0), ("key", "f", 0)]
+
+    def test_human_input_preamble_preserves_unicode_typing(self, monkeypatch):
+        """Human mode must route arbitrary characters through stock key events intact."""
+        monkeypatch.setenv("BROWSER_INPUT_MODE", "human")
+        original_calls = []
+        namespace = {
+            "press_key": lambda key, modifiers=0: original_calls.append((key, modifiers)),
+            "type_text": lambda text: original_calls.append(("stock", text)),
+            "click_at_xy": lambda x, y, button="left", clicks=1: None,
+        }
+        exec(bu_cli._HUMAN_INPUT_PREAMBLE, namespace)
+
+        namespace["type_text"]("a😀中\n!")
+
+        assert original_calls == [
+            ("a", 0),
+            ("😀", 0),
+            ("中", 0),
+            ("\n", 0),
+            ("!", 0),
+        ]
+
     def test_sentinel_never_reaches_subprocess_env(self, tmp_path, monkeypatch):
 
         monkeypatch.setattr("tools.browser_tool_cdp._get_cdp_override", lambda: "")
@@ -937,12 +1060,12 @@ class TestBrowserExec:
         assert "error" in result
 
     def test_code_piped_on_stdin(self, tmp_path, monkeypatch):
-        cli = _fake_cli(tmp_path, 'code=$(cat)\necho "got:$code"\n')
+        cli = _fake_cli(tmp_path, 'code=$(cat)\necho "$code" | grep -q \'print("hi")\' && echo payload-ok\n')
         monkeypatch.setattr(bu_cli, "_find_cli", lambda: [cli])
         result = json.loads(bu_cli.browser_exec('print("hi")'))
         assert result["success"] is True
         assert result["exit_code"] == 0
-        assert 'got:print("hi")' in result["output"]
+        assert "payload-ok" in result["output"]
         assert "session" not in result
 
     def test_session_sets_bu_name(self, tmp_path, monkeypatch):

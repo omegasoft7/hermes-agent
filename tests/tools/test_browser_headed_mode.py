@@ -12,10 +12,12 @@ from tools import browser_tool_session as bt_session
 
 
 def _reset_headed_cache():
-    """Reset the module-level headed-mode cache so tests start clean."""
+    """Reset module-level browser resolution caches so tests start clean."""
     import tools.browser_tool as bt
     bt._cached_headed_mode = None
     bt._headed_mode_resolved = False
+    bt._cached_input_mode = None
+    bt._input_mode_resolved = False
 
 
 @pytest.fixture(autouse=True)
@@ -158,3 +160,108 @@ class TestHeadedFlagInjection:
         assert len(captured) == 1
         assert "--headed" not in captured[0]
         assert "--cdp" in captured[0]
+        assert captured[0].index("--input-mode") < captured[0].index("--cdp")
+
+    @patch("tools.browser_tool_session._get_session_info")
+    @patch("tools.browser_tool_install._find_agent_browser", return_value="/usr/bin/agent-browser")
+    @patch("tools.browser_tool_cloud._is_local_mode", return_value=True)
+    @patch("tools.browser_tool_install._chromium_installed", return_value=True)
+    @patch("tools.browser_tool_cloud._get_cloud_provider", return_value=None)
+    @patch("tools.browser_tool_cdp._get_cdp_override", return_value="")
+    @patch("tools.browser_tool._is_camofox_mode", return_value=False)
+    @patch("tools.browser_tool_cloud._get_browser_engine", return_value="auto")
+    @patch("tools.browser_tool_cloud._get_input_mode", return_value="human")
+    def test_human_input_mode_added_in_local_mode(
+        self, _input_mode, _engine, _camofox, _cdp, _cloud, _chromium, _local, _find, _session
+    ):
+        import tools.browser_tool as bt
+        bt._cached_headed_mode = True
+        bt._headed_mode_resolved = True
+        _session.return_value = {"session_name": "test-sess"}
+
+        captured = self._run_and_capture(bt)
+        assert len(captured) == 1
+        argv = captured[0]
+        assert argv.index("--input-mode") < argv.index("--session")
+        assert argv.index("--input-mode") < argv.index("--headed")
+        assert argv.index("--input-mode") < argv.index("snapshot")
+
+
+# ---------------------------------------------------------------------------
+# Human-paced input default
+# ---------------------------------------------------------------------------
+
+
+def test_input_mode_defaults_to_human_and_rejects_unknown_value():
+    from tools.browser_tool_cloud import _get_input_mode
+
+    with patch("hermes_cli.config.read_raw_config", return_value={}):
+        assert _get_input_mode() == "human"
+    _reset_headed_cache()
+    with patch("hermes_cli.config.read_raw_config", return_value={"browser": {"input_mode": "fast"}}):
+        assert _get_input_mode() == "human"
+
+
+def test_input_mode_config_precedes_environment(monkeypatch):
+    from tools.browser_tool_cloud import _get_input_mode
+
+    monkeypatch.setenv("AGENT_BROWSER_INPUT_MODE", "instant")
+    with patch("hermes_cli.config.read_raw_config", return_value={"browser": {"input_mode": "smooth"}}):
+        assert _get_input_mode() == "smooth"
+    _reset_headed_cache()
+    with patch("hermes_cli.config.read_raw_config", return_value={}):
+        assert _get_input_mode() == "instant"
+
+
+def test_npx_fallback_omits_native_input_mode():
+    """The Node 22-compatible npx release predates --input-mode."""
+    from tools.browser_tool_session import _agent_browser_argv
+
+    argv = _agent_browser_argv("npx agent-browser")
+    assert argv[-1] == "agent-browser@^0.26.0"
+    assert "--input-mode" not in argv
+
+
+def test_agent_browser_argv_injects_configured_input_mode():
+    from tools.browser_tool_session import _agent_browser_argv
+
+    with patch("hermes_cli.config.read_raw_config", return_value={"browser": {"input_mode": "human"}}):
+        assert _agent_browser_argv("agent-browser") == ["agent-browser", "--input-mode", "human"]
+
+
+def test_dispatch_puts_input_mode_before_command_and_headed_flag():
+    from tools import browser_tool_session as session
+
+    commands = []
+    with (
+        patch.object(session._cloud, "_get_browser_engine", return_value="auto"),
+        patch.object(session._cloud, "_is_headed_mode", return_value=True),
+        patch.object(session._cloud, "_get_input_mode", return_value="human"),
+        patch.object(session, "_spawn_and_collect", side_effect=lambda *a: commands.append(a[2]) or {"success": True}),
+        patch.object(session._lp, "_lightpanda_fallback_reason", return_value=None),
+    ):
+        info = {"session_name": "h_test", "cdp_url": None, "features": {"local": True}}
+        session._dispatch_browser_command("t", info, "agent-browser", "open", ["https://example.com"], 10, None)
+
+    assert commands
+    argv = commands[0]
+    assert argv.index("--input-mode") < argv.index("open")
+    assert argv.index("--input-mode") < argv.index("--headed")
+
+
+def test_lightpanda_omits_chromium_input_mode_flag():
+    from tools import browser_tool_session as session
+
+    commands = []
+    with (
+        patch.object(session._cloud, "_get_browser_engine", return_value="lightpanda"),
+        patch.object(session._cloud, "_is_headed_mode", return_value=False),
+        patch.object(session._cloud, "_get_input_mode", return_value="human"),
+        patch.object(session, "_spawn_and_collect", side_effect=lambda *a: commands.append(a[2]) or {"success": True}),
+        patch.object(session._lp, "_lightpanda_fallback_reason", return_value=None),
+    ):
+        info = {"session_name": "lp_test", "cdp_url": None, "features": {"local": True}}
+        session._dispatch_browser_command("t", info, "agent-browser", "open", ["https://example.com"], 10, None)
+
+    assert "--input-mode" not in commands[0]
+    assert commands[0].index("--engine") < commands[0].index("open")

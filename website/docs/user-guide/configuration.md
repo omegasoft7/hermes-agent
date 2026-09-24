@@ -2736,7 +2736,13 @@ Configure browser automation behavior:
 ```yaml
 browser:
   inactivity_timeout: 120        # Seconds before auto-closing idle sessions
-  command_timeout: 30             # Timeout in seconds for browser commands (screenshot, navigate, etc.)
+  command_timeout: 30            # Timeout in seconds for browser commands (screenshot, navigate, etc.)
+  input_mode: human              # Human-paced pointer input: human | smooth | instant
+  # For the built-in agent-browser lane, these map to its native --input-mode
+  # global option when the installed CLI supports it. Browser Use receives the
+  # same value as BROWSER_INPUT_MODE and applies bounded helper pauses. Both
+  # lanes change event timing only; they do not spoof fingerprints or bypass
+  # site controls. Unknown values safely use human.
   record_sessions: false         # Auto-record browser sessions as WebM videos to ~/.hermes/browser_recordings/
   # Optional CDP override — when set, Hermes attaches directly to your own
   # Chromium-family browser (via /browser connect) rather than starting a headless browser.

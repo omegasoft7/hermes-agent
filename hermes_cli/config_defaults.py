@@ -406,6 +406,9 @@ DEFAULT_CONFIG = {
         "backend": "",
         "inactivity_timeout": 120,
         "command_timeout": 30,  # seconds per browser command (screenshot, navigate, etc.)
+        # Input pacing for the built-in agent-browser lane. `human`, `smooth`, and
+        # `instant` map to agent-browser >= 0.38's global input modes.
+        "input_mode": "human",
         "snapshot_threshold": 15000,  # max chars before snapshot truncate-and-store (min 1000)
         "record_sessions": False,  # auto-record browser sessions as WebM videos
         # headed: visible Chromium window (local); skips per-turn cleanup, idle reaper still applies

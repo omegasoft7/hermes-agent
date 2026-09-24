@@ -144,8 +144,9 @@ _EMPTY_OK_COMMANDS: frozenset = frozenset({"close", "record"})  # legitimately e
 # Sentinel _find_agent_browser returns/caches to mean "resolve via npx" rather
 # than a concrete path (also compared in hermes_cli/tools_config.py and doctor.py).
 NPX_AGENT_BROWSER_SENTINEL = "npx agent-browser"
-# Pinned to match scripts/install.sh / install.ps1's managed install so a bare-npx
-# resolution gets the same version instead of floating latest. Update together.
+# Kept on the Node 22-compatible release floor. Native --input-mode starts at
+# 0.38, which needs Node >=24 and is currently age-gated by .npmrc; callers
+# below omit the flag for this fallback until both policy constraints clear.
 AGENT_BROWSER_NPX_SPEC = "agent-browser@^0.26.0"
 
 # Process caches (``_cached_X`` + ``_X_resolved`` pairs) for config-derived lookups;
@@ -170,6 +171,8 @@ _cached_agent_browser: Optional[str] = None
 _agent_browser_resolved = False
 _cached_browser_engine: Optional[str] = None  # agent-browser v0.25.3+ ``--engine lightpanda``
 _browser_engine_resolved = False
+_cached_input_mode: Optional[str] = None
+_input_mode_resolved = False
 _auto_local_for_private_urls_resolved = False
 _cached_auto_local_for_private_urls: bool = True
 _cached_headed_mode: Optional[bool] = None

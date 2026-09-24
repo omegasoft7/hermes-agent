@@ -108,17 +108,18 @@ def _format_browser_timeout_error(
 
 
 def _agent_browser_argv(browser_cmd: str) -> list:
-    """Command prefix to invoke agent-browser (concrete binary, or the npx sentinel expanded).
+    """Command prefix to invoke agent-browser, including native input mode.
 
-    npx is resolved through the same PATH cascade as ``_find_agent_browser`` (a bare
-    ``which("npx")`` would let a broken system npx shadow a healthy managed one); if
-    absent the bare name gives a readable ``FileNotFoundError``. ``--ignore-scripts``:
-    the spec is a floating range — a compromised future patch must not run install scripts.
+    ``--input-mode`` must appear before session/backend flags and the command.
+    It applies to every built-in browser action and to real-profile setup
+    commands that share this prefix. Legacy npx and Lightpanda omit it: the
+    former predates the option, while the latter is a separate CDP engine that
+    rejects Chromium-native options.
     """
     if _install._is_npx_agent_browser_sentinel(browser_cmd):
         _npx_bin = _install._resolve_npx_bin() or "npx"
         return [_npx_bin, "--ignore-scripts", "--prefer-offline", "-y", _bt.AGENT_BROWSER_NPX_SPEC]
-    return [browser_cmd]
+    return [browser_cmd, "--input-mode", _cloud._get_input_mode()]
 
 
 def _shim_safe_args(argv0: str, command: str, args: List[str]) -> "tuple[str, List[str], Optional[bytes]]":
@@ -739,7 +740,16 @@ def _dispatch_browser_command(
         if engine != "auto" and not _bt._is_camofox_mode():
             backend_args += ["--engine", engine]
 
+    # Native input mode must precede every backend flag. Legacy npx omits it;
+    # Lightpanda strips it below because the option is Chromium-native.
     argv = _agent_browser_argv(browser_cmd)
+    if engine == "lightpanda":
+        try:
+            mode_index = argv.index("--input-mode")
+        except ValueError:
+            pass
+        else:
+            del argv[mode_index:mode_index + 2]
     spawn_command, spawn_args, stdin_payload = _shim_safe_args(argv[0], command, args)
     cmd_parts = argv + backend_args + ["--json", spawn_command] + spawn_args
 
